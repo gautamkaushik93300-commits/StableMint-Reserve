@@ -24,12 +24,8 @@ State Variables
         return (mintedAmount[user] * collateralRatio) / PRECISION;
     }
     
-    // Fallback function to receive ETH
-    receive() external payable {
-        collateralDeposits[msg.sender] += msg.value;
-        emit CollateralDeposited(msg.sender, msg.value);
-    }
-}
+    End
+// 
 // 
 End
 // 
