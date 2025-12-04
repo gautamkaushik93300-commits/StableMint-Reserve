@@ -1,105 +1,116 @@
-e.g., USDC, DAI, ETH wrapper
-    StableMintToken public smr;      150% overcollateralization
-    uint256 public mintFeeBps = 20;  0.05%
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.26;
 
-    struct Position {
-        uint256 collateralAmount;
-        uint256 mintedSMR;
-    }
+/**
+ * @title StableMint Reserve
+ * @notice A collateral-backed stablecoin minting system where users deposit ETH to mint stable tokens.
+ *         Tokens can later be burned to redeem collateral, maintaining reserve backing at all times.
+ */
 
-    mapping(address => Position) public positions;
+contract StableMintReserve {
+    
+    string public name = "StableMint Reserve Token";
+    string public symbol = "SMRT";
+    uint8 public decimals = 18;
 
-    event CollateralDeposited(address indexed user, uint256 amount);
-    event SMRMinted(address indexed user, uint256 amount, uint256 fee);
-    event SMRBurned(address indexed user, uint256 amount, uint256 fee);
-    event CollateralWithdrawn(address indexed user, uint256 amount);
+    uint256 public totalSupply;
+    uint256 public constant COLLATERAL_RATIO = 150; // 150% collateral ratio for safety
+
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    // Tracks collateral deposits for each user
+    mapping(address => uint256) public collateralDeposited;
+
+    address public owner;
+
+    event Mint(address indexed user, uint256 collateralAmount, uint256 tokenAmount);
+    event Burn(address indexed user, uint256 tokenAmount, uint256 collateralReturned);
+    event Transfer(address indexed from, address indexed to, uint256 value);
+    event Approval(address indexed owner, address indexed spender, uint256 amount);
 
     modifier onlyOwner() {
-        require(msg.sender == owner, "Not owner");
+        require(msg.sender == owner, "Restricted to owner");
         _;
     }
 
-    constructor(address _collateral) {
-        collateral = IERC20(_collateral);
-        smr = new StableMintToken(address(this));
+    constructor() {
         owner = msg.sender;
     }
 
-    /* --------------------------------------------------------------
-       DEPOSIT COLLATERAL
-    --------------------------------------------------------------*/
-    function depositCollateral(uint256 amount) external {
-        require(amount > 0, "Zero amount");
+    /**
+     * @notice Deposit ETH to mint SMRT stable tokens
+     */
+    function mint() external payable {
+        require(msg.value > 0, "Deposit required");
 
-        collateral.transferFrom(msg.sender, address(this), amount);
-        positions[msg.sender].collateralAmount += amount;
+        uint256 tokenAmount = (msg.value * 100) / COLLATERAL_RATIO; // mint less than collateral to maintain backing
+        collateralDeposited[msg.sender] += msg.value;
+        totalSupply += tokenAmount;
+        balanceOf[msg.sender] += tokenAmount;
 
-        emit CollateralDeposited(msg.sender, amount);
+        emit Mint(msg.sender, msg.value, tokenAmount);
     }
 
-    /* --------------------------------------------------------------
-       MINT SMR AGAINST COLLATERAL
-    --------------------------------------------------------------*/
-    function mintSMR(uint256 amount) external {
-        require(amount > 0, "Zero mint");
+    /**
+     * @notice Burn SMRT tokens and redeem collateral
+     */
+    function burn(uint256 tokenAmount) external {
+        require(balanceOf[msg.sender] >= tokenAmount, "Not enough tokens");
 
-        Position storage p = positions[msg.sender];
+        uint256 collateralToReturn = (tokenAmount * COLLATERAL_RATIO) / 100;
+        require(collateralDeposited[msg.sender] >= collateralToReturn, "Insufficient collateral");
 
-        Check collateral ratio
-        require(_isValidMint(p, amount), "Insufficient collateral");
+        balanceOf[msg.sender] -= tokenAmount;
+        totalSupply -= tokenAmount;
+        collateralDeposited[msg.sender] -= collateralToReturn;
 
-        p.mintedSMR += amount;
+        payable(msg.sender).transfer(collateralToReturn);
 
-        smr.mint(msg.sender, netAmount);
-        smr.mint(owner, fee); Fee
-        uint256 fee = (amount * burnFeeBps) / PRECISION;
-        uint256 netBurn = amount - fee;
-
-        smr.burn(msg.sender, netBurn);
-        smr.burn(msg.sender, fee); Must remain overcollateralized
-        require(
-            _isAboveCollateralRatio(
-                p.collateralAmount - amount,
-                p.mintedSMR
-            ),
-            "Below collateral ratio"
-        );
-
-        p.collateralAmount -= amount;
-        collateral.transfer(msg.sender, amount);
-
-        emit CollateralWithdrawn(msg.sender, amount);
+        emit Burn(msg.sender, tokenAmount, collateralToReturn);
     }
 
-    function _isAboveCollateralRatio(uint256 collateralAmt, uint256 debt)
-        internal
-        view
-        returns (bool)
-    {
-        if (debt == 0) return true;
-        uint256 ratio = collateralAmt * PRECISION / debt;
-        return ratio >= minCollateralRatio;
+    /**
+     * @notice Standard ERC-20 transfer
+     */
+    function transfer(address to, uint256 value) external returns (bool) {
+        require(balanceOf[msg.sender] >= value, "Insufficient balance");
+
+        balanceOf[msg.sender] -= value;
+        balanceOf[to] += value;
+
+        emit Transfer(msg.sender, to, value);
+        return true;
     }
 
-    /* --------------------------------------------------------------
-       ADMIN
-    --------------------------------------------------------------*/
-    function setCollateralRatio(uint256 newRatio) external onlyOwner {
-        require(newRatio >= 120_000, "Ratio too low");
-        minCollateralRatio = newRatio;
+    /**
+     * @notice Approve tokens for spending
+     */
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        emit Approval(msg.sender, spender, amount);
+        return true;
     }
 
-    function setFees(uint256 _mintFeeBps, uint256 _burnFeeBps) external onlyOwner {
-        require(_mintFeeBps <= 200, "Too high");
-        require(_burnFeeBps <= 200, "Too high");
-        mintFeeBps = _mintFeeBps;
-        burnFeeBps = _burnFeeBps;
+    /**
+     * @notice Transfer tokens using allowance (ERC-20)
+     */
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        require(balanceOf[from] >= amount, "Insufficient balance");
+        require(allowance[from][msg.sender] >= amount, "Allowance exceeded");
+
+        allowance[from][msg.sender] -= amount;
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+
+        emit Transfer(from, to, amount);
+        return true;
     }
 
-    function transferOwnership(address newOwner) external onlyOwner {
-        owner = newOwner;
+    /**
+     * @notice Get value of user's collateral reserve
+     */
+    function getCollateral(address user) external view returns (uint256) {
+        return collateralDeposited[user];
     }
 }
-// 
-Contract End
-// 
